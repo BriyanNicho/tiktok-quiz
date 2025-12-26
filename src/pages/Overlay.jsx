@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
+import confetti from 'canvas-confetti';
 import { useTikTokConnection } from '../hooks/useTikTokConnection';
+import { useSoundEffects } from '../hooks/useSoundEffects';
 import QuizCard from '../components/QuizCard';
 import Timer from '../components/Timer';
 import Leaderboard from '../components/Leaderboard';
@@ -15,6 +17,8 @@ export default function Overlay() {
         setOnAction
     } = useTikTokConnection();
 
+    const { playWinner, playCombo, playGift } = useSoundEffects();
+
     // Local derived state
     const [giftQueue, setGiftQueue] = useState([]);
     const [currentGift, setCurrentGift] = useState(null);
@@ -29,20 +33,37 @@ export default function Overlay() {
     useEffect(() => {
         setOnGift((gift) => {
             setGiftQueue(prev => [...prev, gift]);
+            playGift();
         });
-    }, [setOnGift]);
+    }, [setOnGift, playGift]);
 
     // Handle Actions (Winners, etc)
     useEffect(() => {
         setOnAction((msg) => {
             if (msg.actionType === 'showWinners') {
                 setShowWinners(true);
+                playWinner();
+                confetti({
+                    particleCount: 150,
+                    spread: 70,
+                    origin: { y: 0.6 }
+                });
             }
             if (msg.actionType === 'showQuestion') {
                 setShowWinners(false);
             }
+            if (msg.actionType === 'showCombo') {
+                playCombo();
+                confetti({
+                    particleCount: 50,
+                    spread: 40,
+                    startVelocity: 30,
+                    origin: { y: 0.8 },
+                    colors: ['#22d3ee', '#fbbf24']
+                });
+            }
         });
-    }, [setOnAction]);
+    }, [setOnAction, playWinner, playCombo]);
 
     // Process Gift Queue
     useEffect(() => {
@@ -61,12 +82,6 @@ export default function Overlay() {
                 setTimeRemaining(left);
             };
             update(); // immediate
-            // We can rely on the Timer component to count down, 
-            // but we pass the initial duration based on sync.
-            // Better to force Timer component to sync?
-            // Existing Timer component is an interval based decrementer.
-            // We will use key={timerEndTime} to reset it with the correct duration.
-            // But if we refresh mid-timer, duration should be 'remaining'.
 
             const remaining = Math.max(0, Math.ceil((timerEndTime - Date.now()) / 1000));
             setTimeRemaining(remaining);

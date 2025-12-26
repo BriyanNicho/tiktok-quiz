@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { useQuestionManager } from '../hooks/useQuestionManager';
 import { useTikTokConnection } from '../hooks/useTikTokConnection';
+import { useSoundEffects } from '../hooks/useSoundEffects';
 import QuestionForm from '../components/QuestionForm';
 import CsvUploader from '../components/CsvUploader';
 import QuizCard from '../components/QuizCard';
@@ -47,6 +48,12 @@ export default function ControlPanel() {
         setOnChat,
         setOnGift
     } = useTikTokConnection();
+
+    // Sound Effects
+    const { playCorrect, playWrong, playGift, playWinner, playCombo } = useSoundEffects();
+
+    // Streak State (Local session only for now)
+    const [userStreaks, setUserStreaks] = useState({}); // { uniqueId: count }
 
     // UI state
     const [activeTab, setActiveTab] = useState('control');
@@ -93,23 +100,48 @@ export default function ControlPanel() {
             const answerIndex = ['A', 'B', 'C'].indexOf(answer);
             const isCorrect = answerIndex === currentQuestion.correctAnswer;
 
-            if (isCorrect) {
-                // Add Score via Server
-                addScore(msg.uniqueId, msg.nickname, 10);
+            // Mark local answered
+            setAnsweredUsers(prev => new Set([...prev, msg.uniqueId]));
 
-                // Mark local answered
-                setAnsweredUsers(prev => new Set([...prev, msg.uniqueId]));
+            if (isCorrect) {
+                // Streak Logic
+                let streakCount = 1;
+                setUserStreaks(prev => {
+                    const current = prev[msg.uniqueId] || 0;
+                    streakCount = current + 1;
+                    return { ...prev, [msg.uniqueId]: streakCount };
+                });
+
+                // Bonus Score for Streak
+                let points = 10;
+                if (streakCount >= 3) {
+                    points += 5; // Bonus
+                    playCombo(); // Host hears combo
+
+                    // Trigger Combo Animation on Overlay
+                    triggerAction('showCombo', { user: msg.nickname, count: streakCount });
+                } else {
+                    playCorrect(); // Host hears correct
+                }
+
+                // Add Score via Server
+                addScore(msg.uniqueId, msg.nickname, points);
+            } else {
+                // Reset Streak
+                setUserStreaks(prev => ({ ...prev, [msg.uniqueId]: 0 }));
+                playWrong(); // Host hears wrong
             }
         });
-    }, [serverState?.isActive, currentQuestion, answeredUsers, addScore, setOnChat]);
+    }, [serverState?.isActive, currentQuestion, answeredUsers, addScore, setOnChat, playCorrect, playCombo, playWrong, triggerAction]);
 
     // Handle Gifts
     useEffect(() => {
         setOnGift((gift) => {
             // Gifts are handled by Server automatically for scoring,
-            // but we can show local notifications or trigger sound effects here eventually.
+            // but we can show local notifications
+            playGift();
         });
-    }, [setOnGift]);
+    }, [setOnGift, playGift]);
 
     // Auto-Run Logic
     useEffect(() => {
@@ -157,11 +189,6 @@ export default function ControlPanel() {
 
     const handleNextQuestion = () => {
         if (nextQuestion()) {
-            // State update happens in next cycle, so we just prep logic?
-            // nextQuestion() updates local hook state.
-            // We need to wait for it? 
-            // Actually useQuestionManager updates synchronously or in effect.
-            // Better to pass the NEW question explicitly.
             const nextIdx = currentIndex + 1;
             if (nextIdx < questions.length) {
                 const nextQ = questions[nextIdx];
@@ -234,8 +261,8 @@ export default function ControlPanel() {
                             key={tab}
                             onClick={() => setActiveTab(tab)}
                             className={`px-4 py-2 rounded-lg font-medium transition-all ${activeTab === tab
-                                    ? 'bg-cyan-600 text-white shadow-lg shadow-cyan-900/50'
-                                    : 'bg-slate-800/50 text-slate-400 hover:bg-slate-800'
+                                ? 'bg-cyan-600 text-white shadow-lg shadow-cyan-900/50'
+                                : 'bg-slate-800/50 text-slate-400 hover:bg-slate-800'
                                 }`}
                         >
                             {tab.charAt(0).toUpperCase() + tab.slice(1)}

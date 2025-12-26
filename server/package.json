@@ -11,6 +11,7 @@
     "dependencies": {
         "better-sqlite3": "^12.5.0",
         "cors": "^2.8.5",
+        "dotenv": "^17.2.3",
         "express": "^5.2.1",
         "tiktok-live-connector": "^1.1.8",
         "ws": "^8.14.2"

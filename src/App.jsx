@@ -1,6 +1,8 @@
 import { BrowserRouter, Routes, Route, Link } from 'react-router-dom'
 import Overlay from './pages/Overlay'
 import ControlPanel from './pages/ControlPanel'
+import Login from './pages/Login'
+import AuthGuard from './components/AuthGuard'
 import './index.css'
 
 function Home() {
@@ -39,7 +41,10 @@ function App() {
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/overlay" element={<Overlay />} />
-        <Route path="/control" element={<ControlPanel />} />
+        <Route path="/login" element={<Login />} />
+        <Route element={<AuthGuard />}>
+          <Route path="/control" element={<ControlPanel />} />
+        </Route>
       </Routes>
     </BrowserRouter>
   )

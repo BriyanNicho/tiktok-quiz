@@ -8,6 +8,7 @@ import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { WebcastPushConnection } from 'tiktok-live-connector';
 import cors from 'cors';
+import dotenv from 'dotenv';
 import {
     getState, setState,
     updatePintarScore, updateSultanScore,
@@ -15,13 +16,26 @@ import {
     resetScores
 } from './db.js';
 
-const PORT = 3001;
+dotenv.config();
+
+const PORT = process.env.PORT || 3001;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 const RECONNECT_DELAY_BASE = 2000;
 const RECONNECT_DELAY_MAX = 30000;
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Auth Endpoint
+app.post('/api/login', (req, res) => {
+    const { password } = req.body;
+    if (password === ADMIN_PASSWORD) {
+        res.json({ success: true, token: 'session-ok' });
+    } else {
+        res.status(401).json({ success: false, message: 'Password salah!' });
+    }
+});
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });

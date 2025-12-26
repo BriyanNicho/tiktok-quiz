@@ -9,6 +9,9 @@
         "dev": "node --watch index.js"
     },
     "dependencies": {
+        "better-sqlite3": "^12.5.0",
+        "cors": "^2.8.5",
+        "express": "^5.2.1",
         "tiktok-live-connector": "^1.1.8",
         "ws": "^8.14.2"
     }

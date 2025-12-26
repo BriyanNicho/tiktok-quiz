@@ -1,64 +1,83 @@
 /**
- * TikTok Live Quiz - WebSocket Server
- * 
- * This server connects to TikTok Live via tiktok-live-connector
- * and broadcasts events to the React frontend via WebSocket.
+ * TikTok Live Quiz - Robust Server
+ * Features: SQLite Persistence, Auto-Reconnect, REST API + WebSocket
  */
 
+import express from 'express';
+import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { WebcastPushConnection } from 'tiktok-live-connector';
+import cors from 'cors';
+import {
+    getState, setState,
+    updatePintarScore, updateSultanScore,
+    getPintarScores, getSultanScores,
+    resetScores
+} from './db.js';
 
 const PORT = 3001;
+const RECONNECT_DELAY_BASE = 2000;
+const RECONNECT_DELAY_MAX = 30000;
 
-// Store active connections
-let tiktokConnection = null;
-let activeQuestion = null;
-const clients = new Set();
+const app = express();
+app.use(cors());
+app.use(express.json());
 
-// Gift values in coins
-const giftValues = {
-    'Rose': 1,
-    'TikTok': 1,
-    'GG': 1,
-    'Ice Cream Cone': 1,
-    'Heart': 5,
-    'Finger Heart': 5,
-    'Love you': 15,
-    'Doughnut': 30,
-    'Cap': 99,
-    'Hand Hearts': 100,
-    'Perfume': 200,
-    'Garland': 500,
-    'Marvelous Confetti': 1000,
-    'Galaxy': 1000,
-    'Interstellar': 10000,
-    'Lion': 29999
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
+
+// --- Global State ---
+// Load initial state from DB or default
+let appState = getState('appState') || {
+    activeQuestion: null,
+    isActive: false,
+    timerEndTime: null,
+    connectedUser: null
 };
 
-// Create WebSocket server
-const wss = new WebSocketServer({ port: PORT });
+// --- REST API for Persistence ---
 
-console.log(`🚀 WebSocket server running on ws://localhost:${PORT}`);
+app.get('/api/state', (req, res) => {
+    res.json({
+        ...appState,
+        pintarScores: getPintarScores(),
+        sultanScores: getSultanScores(),
+        serverTime: Date.now()
+    });
+});
 
-// Broadcast to all connected clients
+app.post('/api/reset', (req, res) => {
+    resetScores();
+    appState.activeQuestion = null;
+    appState.isActive = false;
+    appState.timerEndTime = null;
+    setState('appState', appState);
+
+    broadcast({ type: 'reset' });
+    res.json({ success: true });
+});
+
+// --- WebSocket Server ---
+
 function broadcast(data) {
     const message = JSON.stringify(data);
-    clients.forEach(client => {
+    wss.clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN) {
             client.send(message);
         }
     });
 }
 
-// Handle WebSocket connections
 wss.on('connection', (ws) => {
     console.log('📱 Client connected');
-    clients.add(ws);
 
-    // Send current connection status
+    // Send immediate sync on connection
     ws.send(JSON.stringify({
-        type: tiktokConnection ? 'connected' : 'disconnected',
-        viewerCount: 0
+        type: 'sync',
+        state: appState,
+        pintarScores: getPintarScores(),
+        sultanScores: getSultanScores(),
+        tiktokStatus: tiktokStatus()
     }));
 
     ws.on('message', async (message) => {
@@ -67,71 +86,105 @@ wss.on('connection', (ws) => {
 
             switch (data.type) {
                 case 'connect':
-                    await connectToTikTok(data.username);
+                    startTikTokConnection(data.username);
                     break;
 
                 case 'disconnect':
-                    disconnectFromTikTok();
+                    stopTikTokConnection();
                     break;
 
-                case 'setQuestion':
-                    activeQuestion = data.question;
-                    console.log(`📝 Active question set: ${activeQuestion?.id}`);
+                case 'updateState':
+                    // Update server state from Control Panel
+                    appState = { ...appState, ...data.state };
+                    setState('appState', appState); // Persist
+                    broadcast({ type: 'stateUpdated', state: appState });
                     break;
 
-                default:
-                    console.log('Unknown message type:', data.type);
+                case 'triggerAction':
+                    // Just relay actions like "showWinners", "showQuestion" to everyone
+                    broadcast({ ...data, from: 'control' });
+                    break;
+
+                case 'addPintarScore':
+                    updatePintarScore(data.uniqueId, data.nickname, data.score);
+                    broadcast({
+                        type: 'updatePintar',
+                        pintarScores: getPintarScores()
+                    });
+                    break;
             }
         } catch (err) {
-            console.error('Failed to parse message:', err);
+            console.error('Message error:', err);
         }
-    });
-
-    ws.on('close', () => {
-        console.log('📴 Client disconnected');
-        clients.delete(ws);
     });
 });
 
-// Connect to TikTok Live
+// --- TikTok Connection Logic ---
+
+let tiktokWrapper = null;
+let reconnectTimer = null;
+let reconnectAttempts = 0;
+
+function tiktokStatus() {
+    return tiktokWrapper ? (tiktokWrapper.isConnected ? 'connected' : 'connecting') : 'disconnected';
+}
+
+async function startTikTokConnection(username) {
+    if (!username) return;
+
+    // Save to DB so we can auto-reconnect on restart if desired (optional)
+    appState.connectedUser = username;
+    setState('appState', appState);
+
+    // Stop existing
+    stopTikTokConnection(false);
+
+    reconnectAttempts = 0;
+    connectToTikTok(username);
+}
+
+function stopTikTokConnection(clearUser = true) {
+    if (tiktokWrapper) {
+        tiktokWrapper.disconnect();
+        tiktokWrapper = null;
+    }
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+    }
+    if (clearUser) {
+        appState.connectedUser = null;
+        setState('appState', appState);
+    }
+    broadcast({ type: 'tiktokStatus', status: 'disconnected' });
+}
+
 async function connectToTikTok(username) {
-    if (!username) {
-        broadcast({ type: 'error', message: 'Username diperlukan' });
-        return;
-    }
+    console.log(`🔗 Connecting to @${username} (Attempt ${reconnectAttempts + 1})`);
+    broadcast({ type: 'tiktokStatus', status: 'connecting' });
 
-    // Disconnect existing connection
-    if (tiktokConnection) {
-        tiktokConnection.disconnect();
-    }
-
-    console.log(`🔗 Connecting to TikTok: @${username}`);
-
-    tiktokConnection = new WebcastPushConnection(username, {
+    const connection = new WebcastPushConnection(username, {
         processInitialData: true,
         enableExtendedGiftInfo: true,
         enableWebsocketUpgrade: true,
-        requestPollingIntervalMs: 2000,
-        sessionId: undefined
+        requestPollingIntervalMs: 2000
     });
 
     try {
-        const state = await tiktokConnection.connect();
+        const state = await connection.connect();
 
-        console.log(`✅ Connected to TikTok Live!`);
-        console.log(`   Room ID: ${state.roomId}`);
-        console.log(`   Viewers: ${state.viewerCount}`);
+        console.log(`✅ Connected to Room: ${state.roomId}`);
+        reconnectAttempts = 0; // Reset on success
 
+        tiktokWrapper = connection;
         broadcast({
-            type: 'connected',
-            roomId: state.roomId,
+            type: 'tiktokStatus',
+            status: 'connected',
             viewerCount: state.viewerCount
         });
 
-        // Listen for chat messages
-        tiktokConnection.on('chat', (data) => {
-            console.log(`💬 ${data.uniqueId}: ${data.comment}`);
-
+        // Event Handlers
+        connection.on('chat', (data) => {
             broadcast({
                 type: 'chat',
                 data: {
@@ -142,94 +195,82 @@ async function connectToTikTok(username) {
                     timestamp: Date.now()
                 }
             });
+            // Note: Gameplay logic (checking answers) is on the client (ControlPanel)
+            // or we could move it here to be even more robust.
+            // For now, let's keep it simple: Server broadcasts events, Client processes.
         });
 
-        // Listen for gifts
-        tiktokConnection.on('gift', (data) => {
-            // For gifts without repeat status, only process if repeatEnd is true
-            if (data.giftType === 1 && !data.repeatEnd) {
-                return;
-            }
+        connection.on('gift', (data) => {
+            if (data.giftType === 1 && !data.repeatEnd) return;
 
-            const coins = giftValues[data.giftName] || data.diamondCount || 1;
+            // Calculate score simple
+            const coins = (data.giftName === 'Rose' ? 1 : data.diamondCount) || 1;
 
-            console.log(`🎁 ${data.uniqueId} sent ${data.giftName} x${data.repeatCount} (${coins} coins)`);
+            // Allow Server to track Sultan scores immediately for persistence?
+            // Actually, Control Panel currently calculates it. 
+            // Better to let Control Panel tell Server to update DB to avoid double logic, 
+            // OR move logic here. 
+            // Move logic here for robustness:
+            updateSultanScore(data.uniqueId, data.nickname, coins * (data.repeatCount || 1));
 
             broadcast({
                 type: 'gift',
                 data: {
-                    uniqueId: data.uniqueId,
-                    nickname: data.nickname,
-                    giftName: data.giftName,
-                    giftPictureUrl: data.giftPictureUrl,
-                    diamondCount: data.diamondCount,
-                    repeatCount: data.repeatCount || 1,
-                    coins: coins * (data.repeatCount || 1),
+                    ...data,
                     timestamp: Date.now()
-                }
+                },
+                sultanScores: getSultanScores() // Send updated scores
             });
         });
 
-        // Listen for viewer count updates
-        tiktokConnection.on('roomUser', (data) => {
-            broadcast({
-                type: 'roomUser',
-                viewerCount: data.viewerCount
-            });
+        connection.on('roomUser', (data) => {
+            broadcast({ type: 'viewerCount', count: data.viewerCount });
         });
 
-        // Listen for likes
-        tiktokConnection.on('like', (data) => {
-            console.log(`❤️ ${data.uniqueId} liked (${data.likeCount} total)`);
+        connection.on('disconnected', () => {
+            console.log('⚠️ TikTok Disconnected');
+            handleReconnect(username);
         });
 
-        // Listen for follows
-        tiktokConnection.on('follow', (data) => {
-            console.log(`➕ ${data.uniqueId} followed`);
+        connection.on('error', (err) => {
+            console.error('TikTok Error:', err);
+            handleReconnect(username);
         });
 
-        // Listen for share
-        tiktokConnection.on('share', (data) => {
-            console.log(`📤 ${data.uniqueId} shared`);
-        });
-
-        // Handle disconnect
-        tiktokConnection.on('disconnected', () => {
-            console.log('❌ Disconnected from TikTok');
-            broadcast({ type: 'disconnected' });
-            tiktokConnection = null;
-        });
-
-        // Handle errors
-        tiktokConnection.on('error', (err) => {
-            console.error('TikTok error:', err);
-            broadcast({ type: 'error', message: err.message });
-        });
+        // Also handle connection wrapper errors
+        connection.wrapper?.on('close', () => handleReconnect(username));
 
     } catch (err) {
-        console.error('❌ Connection failed:', err.message);
-        broadcast({
-            type: 'error',
-            message: `Gagal connect ke @${username}: ${err.message}`
-        });
-        tiktokConnection = null;
+        console.error('❌ Connection Failed:', err.message);
+        handleReconnect(username);
     }
 }
 
-// Disconnect from TikTok
-function disconnectFromTikTok() {
-    if (tiktokConnection) {
-        tiktokConnection.disconnect();
-        tiktokConnection = null;
-        console.log('🔌 Disconnected from TikTok');
-        broadcast({ type: 'disconnected' });
+function handleReconnect(username) {
+    if (reconnectTimer) return; // Already scheduled
+
+    // Stop current instance but keep State intention
+    if (tiktokWrapper) {
+        try { tiktokWrapper.disconnect(); } catch (e) { }
+        tiktokWrapper = null;
     }
+
+    const delay = Math.min(
+        RECONNECT_DELAY_BASE * Math.pow(1.5, reconnectAttempts),
+        RECONNECT_DELAY_MAX
+    );
+
+    console.log(`⏳ Reconnecting in ${delay / 1000}s...`);
+    broadcast({ type: 'tiktokStatus', status: 'reconnecting', nextRetry: Date.now() + delay });
+
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        reconnectAttempts++;
+        connectToTikTok(username);
+    }, delay);
 }
 
-// Handle process termination
-process.on('SIGINT', () => {
-    console.log('\n👋 Shutting down...');
-    disconnectFromTikTok();
-    wss.close();
-    process.exit(0);
+// Start Server
+server.listen(PORT, () => {
+    console.log(`🚀 Server running on http://localhost:${PORT}`);
 });

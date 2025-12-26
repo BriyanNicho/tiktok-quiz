@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import { useTikTokConnection } from '../hooks/useTikTokConnection';
 import QuizCard from '../components/QuizCard';
 import Timer from '../components/Timer';
 import Leaderboard from '../components/Leaderboard';
@@ -6,118 +7,44 @@ import GiftNotification from '../components/GiftNotification';
 import WinnerCelebration from '../components/WinnerCelebration';
 
 export default function Overlay() {
-    // Quiz state - received from Control Panel
-    const [currentQuestion, setCurrentQuestion] = useState(null);
-    const [currentIndex, setCurrentIndex] = useState(0);
-    const [totalQuestions, setTotalQuestions] = useState(0);
-    const [showAnswer, setShowAnswer] = useState(false);
-    const [isQuizActive, setIsQuizActive] = useState(false);
-    const [timerKey, setTimerKey] = useState(0);
+    const {
+        serverState,
+        serverPintarScores,
+        serverSultanScores,
+        setOnGift,
+        setOnAction
+    } = useTikTokConnection();
 
-    // Leaderboards
-    const [pintarScores, setPintarScores] = useState([]);
-    const [sultanScores, setSultanScores] = useState([]);
-
-    // Gift notification queue
+    // Local derived state
     const [giftQueue, setGiftQueue] = useState([]);
     const [currentGift, setCurrentGift] = useState(null);
-
-    // Winner celebration
     const [showWinners, setShowWinners] = useState(false);
 
-    const handleCommand = useCallback((command) => {
-        console.log('Overlay received command:', command);
+    // Synced State
+    const activeQuestion = serverState?.activeQuestion || null;
+    const isActive = serverState?.isActive || false;
+    const timerEndTime = serverState?.timerEndTime || 0;
 
-        switch (command.type) {
-            case 'showQuestion':
-                // Receive question data from Control Panel
-                if (command.question) {
-                    setCurrentQuestion(command.question);
-                    setCurrentIndex(command.index || 0);
-                    setTotalQuestions(command.total || 0);
-                }
-                setShowAnswer(false);
-                setIsQuizActive(true);
-                setTimerKey(prev => prev + 1);
-                break;
+    // Handle Gift Queue
+    useEffect(() => {
+        setOnGift((gift) => {
+            setGiftQueue(prev => [...prev, gift]);
+        });
+    }, [setOnGift]);
 
-            case 'showAnswer':
-                // Also update question data when showing answer
-                if (command.question) {
-                    setCurrentQuestion(command.question);
-                    setCurrentIndex(command.index || 0);
-                    setTotalQuestions(command.total || 0);
-                }
-                setShowAnswer(true);
-                setIsQuizActive(false);
-                break;
-
-            case 'hideQuestion':
-                setIsQuizActive(false);
-                setShowAnswer(false);
-                break;
-
-            case 'updateQuestion':
-                // Update question without changing quiz state
-                if (command.question) {
-                    setCurrentQuestion(command.question);
-                    setCurrentIndex(command.index || 0);
-                    setTotalQuestions(command.total || 0);
-                }
-                break;
-
-            case 'updatePintar':
-                setPintarScores(command.data || []);
-                break;
-
-            case 'updateSultan':
-                setSultanScores(command.data || []);
-                break;
-
-            case 'showGift':
-                setGiftQueue(prev => [...prev, command.data]);
-                break;
-
-            case 'showWinners':
+    // Handle Actions (Winners, etc)
+    useEffect(() => {
+        setOnAction((msg) => {
+            if (msg.actionType === 'showWinners') {
                 setShowWinners(true);
-                break;
-
-            case 'hideWinners':
-                setShowWinners(false);
-                break;
-
-            default:
-                console.log('Unknown command:', command);
-        }
-    }, []);
-
-    // Listen for control panel messages via localStorage
-    useEffect(() => {
-        const handleStorageChange = (e) => {
-            if (e.key === 'quiz_control') {
-                try {
-                    const command = JSON.parse(e.newValue);
-                    handleCommand(command);
-                } catch { }
             }
-        };
+            if (msg.actionType === 'showQuestion') {
+                setShowWinners(false);
+            }
+        });
+    }, [setOnAction]);
 
-        window.addEventListener('storage', handleStorageChange);
-        return () => window.removeEventListener('storage', handleStorageChange);
-    }, [handleCommand]);
-
-    // BroadcastChannel for same-origin communication
-    useEffect(() => {
-        const channel = new BroadcastChannel('quiz_channel');
-
-        channel.onmessage = (e) => {
-            handleCommand(e.data);
-        };
-
-        return () => channel.close();
-    }, [handleCommand]);
-
-    // Process gift queue
+    // Process Gift Queue
     useEffect(() => {
         if (giftQueue.length > 0 && !currentGift) {
             setCurrentGift(giftQueue[0]);
@@ -125,74 +52,95 @@ export default function Overlay() {
         }
     }, [giftQueue, currentGift]);
 
-    const handleGiftComplete = () => {
-        setCurrentGift(null);
-    };
+    // Timer Sync
+    const [timeRemaining, setTimeRemaining] = useState(0);
+    useEffect(() => {
+        if (isActive && timerEndTime) {
+            const update = () => {
+                const left = Math.max(0, Math.ceil((timerEndTime - Date.now()) / 1000));
+                setTimeRemaining(left);
+            };
+            update(); // immediate
+            // We can rely on the Timer component to count down, 
+            // but we pass the initial duration based on sync.
+            // Better to force Timer component to sync?
+            // Existing Timer component is an interval based decrementer.
+            // We will use key={timerEndTime} to reset it with the correct duration.
+            // But if we refresh mid-timer, duration should be 'remaining'.
 
-    const handleTimerComplete = () => {
-        setShowAnswer(true);
-        setIsQuizActive(false);
-    };
+            const remaining = Math.max(0, Math.ceil((timerEndTime - Date.now()) / 1000));
+            setTimeRemaining(remaining);
+        }
+    }, [isActive, timerEndTime]);
 
     return (
-        <div className="overlay-container gradient-premium min-h-screen">
-            {/* TikTok Safe Zone */}
-            <div className="tiktok-safe-zone h-full flex flex-col">
-                {/* Header - Question Counter */}
-                <div className="mb-4 text-center">
-                    {currentQuestion && (
-                        <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full glass-card">
-                            <span className="text-cyan-400 font-bold">Soal {currentIndex + 1}</span>
-                            <span className="text-slate-600">/</span>
-                            <span className="text-slate-400">{totalQuestions}</span>
+        <div className="overlay-container gradient-premium min-h-screen overflow-hidden">
+            <div className="tiktok-safe-zone h-full flex flex-col p-4">
+
+                {/* Header Info */}
+                <div className="mb-4 text-center transition-all duration-300">
+                    {activeQuestion && (
+                        <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full glass-card animate-slide-down">
+                            <span className="text-cyan-400 font-bold">
+                                Soal {serverState?.questionIndex + 1 || '?'}
+                            </span>
+                            {serverState?.totalQuestions && (
+                                <>
+                                    <span className="text-slate-600">/</span>
+                                    <span className="text-slate-400">{serverState.totalQuestions}</span>
+                                </>
+                            )}
                         </div>
                     )}
                 </div>
 
-                {/* Quiz Card */}
-                <div className="flex-shrink-0 mb-4">
+                {/* Main Quiz Card */}
+                <div className="flex-shrink-0 mb-4 transform scale-100 transition-transform">
                     <QuizCard
-                        question={currentQuestion}
-                        showAnswer={showAnswer}
-                        isActive={isQuizActive}
+                        question={activeQuestion}
+                        showAnswer={!isActive && activeQuestion} // Show answer if not active but we have a question (and haven't moved to next)
+                        isActive={isActive}
                     />
                 </div>
 
                 {/* Timer */}
-                {isQuizActive && currentQuestion && (
-                    <div className="mb-4 animate-fade-in">
+                {isActive && activeQuestion && timeRemaining > 0 && (
+                    <div className="mb-6 animate-fade-in">
+                        {/* 
+                           We key by timerEndTime so if it changes, timer resets.
+                           We pass calculated 'remaining' as duration so it picks up where it left off.
+                        */}
                         <Timer
-                            key={timerKey}
-                            duration={currentQuestion.timer || 15}
-                            isActive={isQuizActive && !showAnswer}
-                            onComplete={handleTimerComplete}
+                            key={timerEndTime}
+                            duration={timeRemaining}
+                            isActive={isActive}
+                            onComplete={() => { }}
                         />
                     </div>
                 )}
 
                 {/* Leaderboards */}
-                <div className="flex-1 overflow-hidden">
+                <div className="flex-1 overflow-hidden mt-4">
                     <Leaderboard
-                        pintarData={pintarScores}
-                        sultanData={sultanScores}
+                        pintarData={serverPintarScores}
+                        sultanData={serverSultanScores}
                         showBoth={true}
                         maxItems={5}
                     />
                 </div>
             </div>
 
-            {/* Gift Notification */}
+            {/* Overlays */}
             {currentGift && (
                 <GiftNotification
                     gift={currentGift}
-                    onComplete={handleGiftComplete}
+                    onComplete={() => setCurrentGift(null)}
                 />
             )}
 
-            {/* Winner Celebration */}
             <WinnerCelebration
-                pintarWinners={pintarScores.slice(0, 3)}
-                sultanWinners={sultanScores.slice(0, 3)}
+                pintarWinners={serverPintarScores.slice(0, 3)}
+                sultanWinners={serverSultanScores.slice(0, 3)}
                 isVisible={showWinners}
                 onClose={() => setShowWinners(false)}
             />
